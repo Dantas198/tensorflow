@@ -125,8 +125,10 @@ http_archive(
 # Required for dependency @com_github_grpc_grpc
 
 load("@com_github_grpc_grpc//bazel:grpc_deps.bzl", "grpc_deps")
-
 grpc_deps()
+
+load("@com_github_grpc_grpc//bazel:grpc_extra_deps.bzl", "grpc_extra_deps")
+grpc_extra_deps()
 
 load(
     "@build_bazel_rules_apple//apple:repositories.bzl",
@@ -150,3 +152,12 @@ load("//third_party/googleapis:repository_rules.bzl", "config_googleapis")
 
 config_googleapis()
 
+# Pastor deps
+http_archive(
+  name = "com_github_jbeder_yaml_cpp",
+  strip_prefix = "yaml-cpp-a6bbe0e50ac4074f0b9b44188c28cf00caf1a723",
+  sha256 = "e34592214d738498f2d2b4080c607dc59e5e63602b4b7af8d89bcfcc3f390015",
+  urls = [
+      "https://github.com/jbeder/yaml-cpp/archive/a6bbe0e50ac4074f0b9b44188c28cf00caf1a723.tar.gz", 
+  ],
+)

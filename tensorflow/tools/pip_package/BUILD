@@ -223,6 +223,7 @@ filegroup(
         "//tensorflow:ios": [],
         "//tensorflow:linux_s390x": [],
         "//tensorflow:windows": [],
+        "//tensorflow:no_prisma_support": [],
         "//tensorflow:no_aws_support": [],
         "//conditions:default": [
             "@aws//:LICENSE",

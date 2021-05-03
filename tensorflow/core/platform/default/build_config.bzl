@@ -665,7 +665,26 @@ def tf_additional_core_deps():
         "//conditions:default": [
             clean_dep("//tensorflow/core/platform/s3:s3_file_system"),
         ],
+    }) + select({
+        clean_dep("//tensorflow:android"): [],
+        clean_dep("//tensorflow:ios"): [],
+        clean_dep("//tensorflow:linux_s390x"): [],
+        clean_dep("//tensorflow:windows"): [],
+        clean_dep("//tensorflow:no_pastor_support"): [],
+        "//conditions:default": [
+            clean_dep("//tensorflow/core/platform/pastor:pastor_file_system"),
+        ],
     })
+    # + select({
+    #     clean_dep("//tensorflow:android"): [],
+    #     clean_dep("//tensorflow:ios"): [],
+    #     clean_dep("//tensorflow:linux_s390x"): [],
+    #     clean_dep("//tensorflow:windows"): [],
+    #     clean_dep("//tensorflow:no_prisma_support"): [],
+    #     "//conditions:default": [
+    #         clean_dep("//tensorflow/core/platform/prisma:prisma_file_system"),
+    #     ],
+    # })
 
 def tf_lib_proto_parsing_deps():
     return [
