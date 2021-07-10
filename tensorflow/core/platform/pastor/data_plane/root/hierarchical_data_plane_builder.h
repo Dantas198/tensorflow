@@ -7,15 +7,6 @@
 
 #include "hierarchical_data_plane.h"
 
-enum CacheEvictionPolicy {
-    FORWARD_DEMOTION = 0x01,
-};
-
-enum CacheInsertionPolicy {
-    FIRST_LEVEL_ONLY = 0x01,
-    FREE_STORAGE = 0x02,
-};
-
 class HierarchicalDataPlaneBuilder {
     HierarchicalDataPlane* data_plane;
 
@@ -33,9 +24,10 @@ public:
     HierarchicalDataPlaneBuilder& with_storage_hierarchy(std::vector<std::vector<DataStorageDriver*>> matrix);
     HierarchicalDataPlaneBuilder& with_storage_hierarchy_pools(std::vector<ctpl::thread_pool*> pools);
     HierarchicalDataPlaneBuilder& with_debug_enabled(const std::string& dir_path, int unique_id);
-    HierarchicalDataPlaneBuilder& with_metadata_container(MetadataContainerService* mdc);
+    HierarchicalDataPlaneBuilder& with_metadata_container(MetadataContainerService<FileInfo>* mdc);
     HierarchicalDataPlaneBuilder& with_shared_thread_pool(int pool_size);
     HierarchicalDataPlaneBuilder& with_batch_rate_limit(int size);
+    HierarchicalDataPlaneBuilder& with_client_watch_rate_limit(int size);
     HierarchicalDataPlaneBuilder& with_profiling_enabled(ProfilerProxy* p);
     HierarchicalDataPlaneBuilder& with_type(const std::string& type);
     HierarchicalDataPlaneBuilder& with_storage_synchronization_timeout(int timeout);

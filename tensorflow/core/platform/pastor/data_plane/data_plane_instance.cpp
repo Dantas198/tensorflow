@@ -7,18 +7,22 @@
 #include "parser/configuration_parser.h"
 
 DataPlaneInstance* DataPlaneInstance::instance{nullptr};
-bool DataPlaneInstance::initialized{false};
-std::mutex DataPlaneInstance::m;
+absl::once_flag DataPlaneInstance::once_;
 
 DataPlaneInstance *DataPlaneInstance::get_instance(const std::string &c_server_addr){
-    std::unique_lock<std::mutex> ul(m);
-    if(!initialized){
-        instance = new DataPlaneInstance(c_server_addr);
+    return get_instance(0, "none", c_server_addr, "");
+}
+
+
+DataPlaneInstance *DataPlaneInstance::get_instance(int rank, const std::string &group, const std::string &c_server_addr, const std::string &dp_server_addr){
+    absl::call_once(once_, [rank, group, c_server_addr, dp_server_addr](){
+        instance = new DataPlaneInstance(rank, 0);
+        instance->bind(group, c_server_addr, dp_server_addr);
         instance->start();
-        initialized = true;
-    }
+    });
     return instance;
 }
+
 
 DataPlaneInstance::DataPlaneInstance(){
     rank_ = 0;
@@ -28,12 +32,6 @@ DataPlaneInstance::DataPlaneInstance(){
 DataPlaneInstance::DataPlaneInstance(int rank, int worker_id){
     rank_ = rank;
     worker_id_ = worker_id;
-}
-
-DataPlaneInstance::DataPlaneInstance(const std::string &c_server_addr){
-    rank_ = 0;
-    worker_id_ = 0;
-    bind("none", c_server_addr, "");
 }
 
 void DataPlaneInstance::bind(const std::string &group, const std::string &c_server_addr, const std::string &dp_server_addr){

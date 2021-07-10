@@ -8,6 +8,7 @@
 #include <mutex>
 #include "data_plane.h"
 #include "remote/remote_stage_builder.h"
+#include "absl/base/call_once.h"
 
 //https://stackoverflow.com/questions/19133552/crop-an-image-from-a-byte-array
 //https://stackoverflow.com/questions/63880081/how-to-convert-a-torch-tensor-into-a-byte-string
@@ -21,17 +22,14 @@ private:
     DataPlane* data_plane;
     RemoteStageBuilder* remote_handler;
 
+    static absl::once_flag once_;
     static DataPlaneInstance* instance;
-    static bool initialized;
-    static std::mutex m;
-
-protected:
-    DataPlaneInstance(const std::string &c_server_addr);
 
 public:
     DataPlaneInstance(DataPlaneInstance &dpi) = delete;
     void operator=(const DataPlaneInstance &) = delete;
     static DataPlaneInstance *get_instance(const std::string &c_server_addr);
+    static DataPlaneInstance *get_instance(int rank, const std::string &group, const std::string &c_server_addr, const std::string &dp_server_addr);
 
     DataPlaneInstance();
     DataPlaneInstance(int rank, int worker_id);

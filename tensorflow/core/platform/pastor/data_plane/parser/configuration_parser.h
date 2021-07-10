@@ -21,10 +21,14 @@ class RemoteStageBuilder;
 
 class ConfigurationParser {
 private:
+    static ControlPolicy parse_control_policy(YAML::Node type_configs);
+    static ReadPolicy parse_read_policy(YAML::Node type_configs);
+    static PlacementPolicy parse_placement_policy(YAML::Node type_configs);
+    static EvictCallType parse_evict_call_type(YAML::Node type_configs);
     static HierarchicalDataPlaneBuilder* parseHierarchicalDataPlaneBuilder(RemoteStageBuilder* rbuilder, YAML::Node root_data_plane_configs);
     static PrefetchDataPlaneBuilder* parsePrefetchDataPlaneBuilder(HierarchicalDataPlane *root_data_plane, YAML::Node configs);
     static DataPlane* parseDataPlane(HierarchicalDataPlaneBuilder* root_data_plane_builder, YAML::Node configs);
-    static DataStorageDriver* parseStorageDriver(YAML::Node driver_configs);
+    static DataStorageDriver* parseStorageDriver(YAML::Node driver_configs, YAML::Node configs, int level);
     static ProfilerProxy* parseProfiler(YAML::Node configs);
 public:
     static DataPlane* parse(RemoteStageBuilder* rbuilder);

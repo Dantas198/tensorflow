@@ -54,8 +54,12 @@ cc_library(
 		":controller_service_cc_grpc",
 		"//third_party/tbb:tbb",
 		"//third_party/ctpl:ctpl",
+        "//third_party/parallel_hashmap:parallel_hashmap",
 		"@com_github_grpc_grpc//:grpc++",
 		"@com_github_jbeder_yaml_cpp//:yaml-cpp",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/base",
+        "@com_google_absl//absl/strings"
 	]
 )
 

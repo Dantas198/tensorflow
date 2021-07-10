@@ -5,277 +5,148 @@
 #include <thread>
 #include <cstring>
 #include <iostream>
-#include "prefetch_data_plane.h"
-#include "prefetch_data_plane_builder.h"
 #include <unordered_map>
 #include <cmath>
+#include "prefetch_data_plane.h"
+#include "prefetch_data_plane_builder.h"
+#include "../handlers/control_handler.h"
+
 
 PrefetchDataPlane::PrefetchDataPlane(HierarchicalDataPlane* rdp) : HierarchicalDataPlane(rdp){
     eviction_percentage = 0.1;
     allocated_samples_index = 0;
+    becomes_full = true;
 }
 
-void PrefetchDataPlane::flush_postponed(){
-    if(!postponed_queue.empty()){
-        debug_write("Handling postponed requests");
-        long res = postponed_queue.size();
-        while(res > 0) {
-            auto* f = postponed_queue.front();
-            debug_write("On handling postponed requests retrieved request with id: " +std::to_string(f->get_request_id()));
-            Status s = place(f);
-            if(s.state == DELAYED)
-                break;
-            else{
-                res--;
-                postponed_queue.pop();
-            }
-        }
-        if(res == 0) {
-            debug_write("All postponed requests are treated...resuming delayed requests treatment");
-            Status s = update_queue_and_place();
-            if(s.state == SUCCESS) {
-                debug_write("After treating postponed requests update queue and place did not return DELAYED. Enforcing rate continuation");
-                enforce_rate_continuation(allocated_samples_index);
-            }
-        }
-    }
-}
-//Not async. TODO
-void PrefetchDataPlane::async_remove(MutexFileInfo* mfi, int level, bool unload){
-    remove(mfi, level);
-    if(unload){
-        mfi->unloaded_to(storage_hierarchy_size - 1);
-    }
-    debug_write("Removed from level: " + std::to_string(level) + " file: " + mfi->get_name());
-    housekeeper_thread_pool->push([this, mfi, level](int id){
-        get_alloc_driver(level)->free_storage(mfi);
-        debug_write("Current storage size: " + std::to_string(get_alloc_driver(level)->current_storage_size()));
-        flush_postponed();
-    });
-}
 
-//use to write to level 0
-void PrefetchDataPlane::async_write(PrefetchedFile* f, int level){
-    t_pool(level)->push([this, f, level, name = f->get_filename()](int id){
-        write(f, level);
-        MutexFileInfo* mfi = f->get_info();
-        mfi->loaded_to(level);
-        apply_job_termination();
-        HierarchicalDataPlane::placed_samples++;
-        //debug_write("Data written to level: " + std::to_string(level) + " file: " + mfi->get_name() + " id: " + std::to_string(f->get_request_id()));
-        if(!get_alloc_driver(level)->in_memory_type())
-            delete f;
-    });
-}
+//TODO review this
+void PrefetchDataPlane::start_prefetching_solo_placement(){
+    int iter_size = HierarchicalDataPlane::metadata_container->get_file_count();
+    HierarchicalDataPlane::set_total_jobs(iter_size);
+    debug_write("Instance with rank "  + std::to_string(rank) + " starting prefetching with iter size: " + std::to_string(iter_size));
+    for (int i = 0; i < iter_size; i++){
+        int sample_id  = HierarchicalDataPlane::get_list_index(rank, worker_id, i);
+        auto* sfi = (StrictFileInfo*)metadata_container->get_metadata(sample_id);
+        if(enforce_rate_limit())
+            debug_write("Rate limit was enforced");
+        HierarchicalDataPlane::apply_job_start();
+        debug_write("Prefetching local_index: " + std::to_string(i) + ", sample_id: " + std::to_string(sample_id) + " name: " + sfi->get_name());
 
-void PrefetchDataPlane::evict(MutexFileInfo* mfi){
-    int fl = HierarchicalDataPlane::free_level(mfi, 1);
-    if(mfi->finish_read() == 0){
-        if(fl > 0){
-            debug_write("Evicting file: " + mfi->get_name() + " to storage level: " + std::to_string(fl));
-            get_alloc_driver(fl)->allocate_storage(mfi);
-            t_pool(0)->push([this, mfi, fl](int id){
-                auto* f = new PrefetchedFile(mfi, -1);
-                HierarchicalDataPlane::read(f, 0);
-                async_remove(mfi, mfi->get_storage_level(), false);
-                async_write(f, fl);
+        //TODO make reached_stability atomic?
+        if(control_handler->check_placement_validity()) {
+            prefetch_thread_pool->push([this, sfi, i](int id) {
+                if (!sfi->init_prefetch()) {
+                    debug_write("File already dealt with  id: " + std::to_string(i) + " name: " + sfi->get_name());
+                } else {
+                    debug_write("Prefetching id: " + std::to_string(i) + ", name: " + sfi->get_name() + " from level " +
+                                std::to_string(sfi->get_storage_level()));
+                    auto* f = new PrefetchedFile(sfi, i);
+                    HierarchicalDataPlane::read_from_storage(f, sfi->get_storage_level());
+                    control_handler->place(f);
+                }
+                HierarchicalDataPlane::apply_job_termination();
             });
-        }
-        else{
-            debug_write("No storage space in any level. Fully discarding file: " + mfi->get_name());
-            t_pool(0)->push([this, mfi](int id){
-                async_remove(mfi, mfi->get_storage_level(), true);
-            });
+        }else{
+            HierarchicalDataPlane::apply_job_termination();
         }
     }
-    else{
-        debug_write("Cannot evict. File will be read again: " + mfi->get_name());
-    }
+    HierarchicalDataPlane::await_termination();
+    debug_write("Prefetch ended!");
 }
 
-Status PrefetchDataPlane::place(PrefetchedFile* f){
-    if(!f->is_placeholder()) {
-        int to_level = 0;
-        if(placement_strategy == PD)
-            to_level = HierarchicalDataPlane::free_level(f->get_info(), 0);
-        if (is_allocable(to_level) && to_level >= 0) {
-            auto *driver = get_alloc_driver(to_level);
-            //edge case
-            if (driver->becomesFull(f->get_info()) && placement_strategy == CR) {
-                debug_write("Intended driver becomes full with file: " + std::to_string(f->get_request_id())
-                + " current size: " + std::to_string(get_alloc_driver(to_level)->current_storage_size()));
-                //std::cout << "storage size: " << driver->current_storage_size() << std::endl;
-                return {DELAYED};
-            }
-            else {
-                debug_write("Proceeding with storage allocation for file: " + std::to_string(f->get_request_id()));
-                driver->allocate_storage(f->get_info());
-                allocated_samples_index++;
-                debug_write("Updating allocated index to: " + std::to_string(allocated_samples_index));
-                async_write(f, to_level);
-            }
-        } else {
-            debug_write("Cannot place file. Fully discarding it");
-        }
-    }else {
-        apply_job_termination();
-        allocated_samples_index++;
-        debug_write("Updating allocated index to: " + std::to_string(allocated_samples_index));
-    }
-    return {SUCCESS};
-}
-
-
-bool PrefetchDataPlane::in_order(PrefetchedFile* f) const{
-    return f->get_request_id() == allocated_samples_index;
-}
-
-Status PrefetchDataPlane::update_queue_and_place(){
-    for(int i = 0; i < placement_queue.size(); i++){
-        auto* f = placement_queue[i];
-        if(in_order(f)){
-            debug_write("Placement queue is being updated: found an in order request with id: " + std::to_string(f->get_request_id()));
-            Status s = place(f);
-            placement_queue.erase(placement_queue.begin() + i);
-            if(s.state == SUCCESS) {
-                debug_write("Delayed element was successfuly added: his timestamp: " + std::to_string(f->get_request_id()));
-                return update_queue_and_place();
-            }else{
-                debug_write("Delayed element will be postponed timestamp: " + std::to_string(f->get_request_id()));
-                postponed_queue.push(f);
-                return {DELAYED};
-            }
-        }
-    }
-    //Success represents an empty queue or no new ordered files
-    return {SUCCESS};
-}
-
-//We know already that any f to handle here is not on the level 0
-Status PrefetchDataPlane::handle_placement(PrefetchedFile* f){
-    if(in_order(f)){
-        debug_write("Found an in order file with timestamp: " + std::to_string(f->get_request_id()));
-        Status s = place(f);
-        if(s.state == SUCCESS){
-            s = update_queue_and_place();
-            if(s.state == DELAYED){
-                debug_write("Update queue and place returned DELAYED. Enforcing rate brake!");
-                enforce_rate_brake(allocated_samples_index);
-            }
-        }
-        else{
-            debug_write("Postponing placement request for file with timestamp: " + std::to_string(f->get_request_id()) + ". Enforcing rate brake!");
-            postponed_queue.push(f);
-            enforce_rate_brake(allocated_samples_index);
-        }
-        return s;
-    }
-    else {
-        debug_write("Found an out of order placement request, timestamp: " + std::to_string(f->get_request_id()) + " current index is: " + std::to_string(allocated_samples_index) );
-        placement_queue.push_back(f);
-        return {DELAYED};
-    }
-}
-
-void PrefetchDataPlane::start_prefetching() {
+void PrefetchDataPlane::start_prefetching_with_eviction(){
     int iter_size = HierarchicalDataPlane::metadata_container->get_iter_size();
     HierarchicalDataPlane::set_total_jobs(iter_size);
     debug_write("Instance with rank "  + std::to_string(rank) + " starting prefetching with iter size: " + std::to_string(iter_size));
     for (int i = 0; i < iter_size; i++){
         int sample_id  = HierarchicalDataPlane::get_list_index(rank, worker_id, i);
-        auto* mfi = (MutexFileInfo*)metadata_container->get_metadata(sample_id);
+        auto* sfi = (StrictFileInfo*)metadata_container->get_metadata(sample_id);
         if(enforce_rate_limit())
             debug_write("Rate limit was enforced");
-        debug_write("Prefetching local_index: " + std::to_string(i) + ", sample_id: " + std::to_string(sample_id));
+        HierarchicalDataPlane::apply_job_start();
+        debug_write("Prefetching local_index: " + std::to_string(i) + ", sample_id: " + std::to_string(sample_id) + " name: " + sfi->get_name());
 
-        prefetch_thread_pool->push([this, mfi, i](int id){
-            mfi->reset_consumed_size();
-            auto* f = new PrefetchedFile(mfi, i);
+        prefetch_thread_pool->push([this, sfi, i](int id){
+            auto* f = new PrefetchedFile(sfi, i);
 
-            if(mfi->init_prefetch()){
-                debug_write("File already dealt with or is in the upper_level id: " + std::to_string(i));
+            if(!sfi->init_prefetch()){
+                debug_write("File already dealt with or is in the upper_level id: " + std::to_string(i) + " name: " + sfi->get_name());
                 f->set_as_placeholder();
             }else {
-                debug_write("Prefetching id: " + std::to_string(i) + " from level " + std::to_string(f->get_info()->get_storage_level()));
-                HierarchicalDataPlane::read(f, f->get_info()->get_storage_level());
+                debug_write("Prefetching id: " + std::to_string(i) + ", name: " + sfi->get_name() + " from level " + std::to_string(sfi->get_storage_level()));
+                HierarchicalDataPlane::read_from_storage(f, sfi->get_storage_level());
             }
-            housekeeper_thread_pool->push([this, f](int id){
-                handle_placement(f);
-            });
+            control_handler->place(f);
         });
     }
     HierarchicalDataPlane::await_termination();
+    debug_write("Prefetch ended!");
 }
 
-
-ssize_t PrefetchDataPlane::read(MutexFileInfo* mfi, char* result, uint64_t offset, size_t n){
-    if(offset >= mfi->_get_size()) {
-        debug_write("Tried to read from offset: " + std::to_string(offset) + " which goes beond file size: " +
-                    std::to_string(mfi->_get_size()) + " name: " + mfi->get_name());
-        return 0;
+void PrefetchDataPlane::start_prefetching() {
+    if(control_policy == SOLO_PLACEMENT){
+        start_prefetching_solo_placement();
     }else{
-        debug_write("Read from offset: " + std::to_string(offset) + " n: " + std::to_string(n) +
-            " name: " + mfi->get_name());
+        start_prefetching_with_eviction();
     }
-    if(placement_strategy == CR) {
-        bool waited = mfi->wait_on_data_transfer();
+}
+
+ssize_t PrefetchDataPlane::read(StrictFileInfo* sfi, char* result, uint64_t offset, size_t n){
+    if(offset >= sfi->_get_size()) {
+        debug_write("Tried to read from offset: " + std::to_string(offset) + " which goes beond file size: " +
+                    std::to_string(sfi->_get_size()) + " name: " + sfi->get_name());
+        return 0;
+    }
+
+    if(read_policy == WAIT_ENFORCED) {
+        bool waited = sfi->await_loaded_data(0);
         if (waited)
-            debug_logger->_write("Client waited for file: " + mfi->get_name());
+            debug_write("Client waited for file: " + sfi->get_name());
     }
-    File* f = new File(mfi, offset, n);
-    Status s = HierarchicalDataPlane::read(f, mfi->get_storage_level());
+    debug_write("Read from offset: " + std::to_string(offset) + " n: " + std::to_string(n)
+                + " name: " + sfi->get_name() + " from level " + std::to_string(sfi->get_storage_level()));
+    File* f = new File(sfi, offset, n);
+    Status s = HierarchicalDataPlane::read_from_storage(f, sfi->get_storage_level());
     memcpy(result, f->get_content(), f->get_requested_size());
     delete f;
-    if(becomes_full && placement_strategy == CR) {
-        if(mfi->consume(s.bytes_size)) {
-            housekeeper_thread_pool->push([this, mfi](int id) { evict(mfi); });
-        }
+    if(offset + n >= sfi->_get_size()) {
+        control_handler->evict(sfi);
     }
     return s.bytes_size;
 }
 
 ssize_t PrefetchDataPlane::read(const std::string& filename, char* result, uint64_t offset, size_t n){
-    auto* mfi = (MutexFileInfo*)(HierarchicalDataPlane::metadata_container->get_metadata(filename));
+    auto* mfi = (StrictFileInfo*)(HierarchicalDataPlane::metadata_container->get_metadata(filename));
     return read(mfi, result, offset, n);
 }
 
 ssize_t PrefetchDataPlane::read_from_id(int file_id, char* result, uint64_t offset, size_t n){
-    auto* mfi = (MutexFileInfo*)(HierarchicalDataPlane::metadata_container->get_metadata(file_id));
+    auto* mfi = (StrictFileInfo*)(HierarchicalDataPlane::metadata_container->get_metadata(file_id));
     return read(mfi, result, offset, n);
 }
 
 ssize_t PrefetchDataPlane::read_from_id(int file_id, char* result){
-    auto* mfi = (MutexFileInfo*)(HierarchicalDataPlane::metadata_container->get_metadata(file_id));
+    auto* mfi = (StrictFileInfo*)(HierarchicalDataPlane::metadata_container->get_metadata(file_id));
     return read(mfi, result, 0, mfi->_get_size());
 }
 
-PrefetchDataPlaneBuilder PrefetchDataPlane::create(HierarchicalDataPlane* rdp) {
-    return PrefetchDataPlaneBuilder(rdp);
-}
-
-PrefetchDataPlaneBuilder* PrefetchDataPlane::heap_create(HierarchicalDataPlane* rdp) {
+PrefetchDataPlaneBuilder* PrefetchDataPlane::create(HierarchicalDataPlane* rdp) {
     return new PrefetchDataPlaneBuilder{rdp};
 }
 
 void PrefetchDataPlane::init(){
     HierarchicalDataPlane::init();
-    if(is_allocable(0)){
-        auto* driver = get_alloc_driver(0);
-        becomes_full = metadata_container->get_full_size() >= driver->get_max_storage_size();
-    }
-    std::string b_f = becomes_full ? "true" : "false";
-    debug_write("First storage level becomes full: " + b_f );
 }
 
 void PrefetchDataPlane::start(){
+    HierarchicalDataPlane::start();
     std::thread producer_thread(&PrefetchDataPlane::start_prefetching, this);
     producer_thread.detach();
+    /* TODO
     synchronization_thread_pool->push([this](int id){
-        if(placement_strategy == CR)
-            HierarchicalDataPlane::start_sync_loop(1);
-        else
-            HierarchicalDataPlane::start_sync_loop(0);
+        HierarchicalDataPlane::start_sync_loop(1);
     });
+     */
 }
 
 std::vector<std::string> PrefetchDataPlane::configs(){
@@ -295,5 +166,7 @@ void PrefetchDataPlane::print(){
 }
 
 void PrefetchDataPlane::debug_write(const std::string& msg){
-    debug_logger->_write("[PrefetchDataPlane] " + msg);
+    if(debug_logger->is_activated()) {
+        debug_logger->_write("[PrefetchDataPlane] " + msg);
+    }
 }

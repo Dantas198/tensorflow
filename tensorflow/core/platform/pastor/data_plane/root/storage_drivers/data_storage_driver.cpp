@@ -29,10 +29,17 @@ AllocableDataStorageDriver::AllocableDataStorageDriver(BaseDataStorageDriver* ba
     AllocableDataStorageDriver::base_storage_driver = base_storage_driver;
 }
 
+AllocableDataStorageDriver::AllocableDataStorageDriver(AllocableDataStorageDriver* to_copy){
+    AllocableDataStorageDriver::base_storage_driver = to_copy->base_storage_driver;
+    AllocableDataStorageDriver::current_size = to_copy->current_size;
+    AllocableDataStorageDriver::max_storage_size = to_copy->max_storage_size;
+    AllocableDataStorageDriver::max_storage_occupation_threshold = to_copy->max_storage_occupation_threshold;
+    delete to_copy;
+}
+
 Status AllocableDataStorageDriver::allocate_storage(FileInfo* fi){
     ssize_t bytes_to_alloc = base_storage_driver->sizeof_content(fi);
-
-    if (bytes_to_alloc + current_size >= max_storage_size)
+    if (bytes_to_alloc + current_size > max_storage_size)
         return {STORAGE_FULL};
 
     current_size += bytes_to_alloc;
@@ -40,8 +47,17 @@ Status AllocableDataStorageDriver::allocate_storage(FileInfo* fi){
 
     if (current_occupation >= max_storage_occupation_threshold)
         return {SUCCESS, OCCUPATION_THRESHOLD_REACHED, bytes_to_alloc};
-
     return {bytes_to_alloc};
+}
+
+Status AllocableDataStorageDriver::conditional_allocate_storage(FileInfo* fi){
+    ssize_t bytes_to_alloc = base_storage_driver->sizeof_content(fi);
+    if(bytes_to_alloc + current_size <= max_storage_size){
+        current_size += bytes_to_alloc;
+        return {bytes_to_alloc};
+    }else{
+        return {STORAGE_FULL};
+    }
 }
 
 Status AllocableDataStorageDriver::free_storage(FileInfo* fi){
@@ -63,7 +79,7 @@ bool AllocableDataStorageDriver::occupation_threshold_reached() const{
     return current_size >= max_storage_size * max_storage_occupation_threshold;
 }
 
-size_t AllocableDataStorageDriver::current_storage_size() const{
+size_t AllocableDataStorageDriver::current_storage_size(){
     return current_size;
 }
 
@@ -75,22 +91,21 @@ Status AllocableDataStorageDriver::read(File* f){
     return base_storage_driver->read(f);
 }
 
+Status AllocableDataStorageDriver::read(FileInfo* fi, char* result, uint64_t offset, size_t n){
+    return base_storage_driver->read(fi, result, offset, n);
+}
+
 Status AllocableDataStorageDriver::write(File* f){
-    if (auto_storage_management){
-        Status s = allocate_storage(f->get_info());
-        if (s.state == STORAGE_FULL)
-            return s;
-    }
     return base_storage_driver->write(f);
 }
 
 Status AllocableDataStorageDriver::remove(FileInfo* fi){
-    Status res = base_storage_driver->remove(fi);
-    if(auto_storage_management)
-        free_storage(fi);
-    return res;
+    return base_storage_driver->remove(fi);
 }
 
+File* AllocableDataStorageDriver::remove_for_copy(FileInfo* fi){
+    return base_storage_driver->remove_for_copy(fi);
+}
 
 ssize_t AllocableDataStorageDriver::sizeof_content(FileInfo* fi){
     return base_storage_driver->sizeof_content(fi);
@@ -98,6 +113,10 @@ ssize_t AllocableDataStorageDriver::sizeof_content(FileInfo* fi){
 
 bool AllocableDataStorageDriver::in_memory_type(){
     return base_storage_driver->in_memory_type();
+}
+
+bool AllocableDataStorageDriver::file_system_type(){
+    return base_storage_driver->file_system_type();
 }
 
 void AllocableDataStorageDriver::create_environment(std::vector<std::string>& dirs){
@@ -108,11 +127,132 @@ std::vector<std::string> AllocableDataStorageDriver::configs(){
     auto configs = base_storage_driver->configs();
     configs.push_back("max_storage_size: " + std::to_string(max_storage_size) + "\n");
     configs.push_back("max_storage_occupation_threshold: " + std::to_string(max_storage_occupation_threshold) + "\n");
-    std::string b = auto_storage_management ? "true" : "false";
-    configs.push_back("auto_storage_management: " + b + "\n");
     return configs;
 }
 
 std::string AllocableDataStorageDriver::prefix() {
     return base_storage_driver->prefix();
+}
+
+BaseDataStorageDriver* AllocableDataStorageDriver::get_base_storage_driver(){
+    return base_storage_driver;
+}
+
+BlockingAllocableDataStorageDriver::BlockingAllocableDataStorageDriver(BaseDataStorageDriver *baseStorageDriver)
+        : AllocableDataStorageDriver(baseStorageDriver) {
+
+    mutex = std::make_unique<std::mutex>();
+    is_full = std::make_unique<std::condition_variable>();
+    waiting = 0;
+}
+
+BlockingAllocableDataStorageDriver::BlockingAllocableDataStorageDriver(AllocableDataStorageDriver* base) : AllocableDataStorageDriver(base){
+    mutex = std::make_unique<std::mutex>();
+    is_full = std::make_unique<std::condition_variable>();
+    waiting = 0;
+}
+
+const std::unique_ptr<std::mutex> &BlockingAllocableDataStorageDriver::get_mutex() const{
+    return mutex;
+}
+
+const std::unique_ptr<std::condition_variable> &BlockingAllocableDataStorageDriver::get_cond_var() const{
+    return is_full;
+}
+
+bool BlockingAllocableDataStorageDriver::blocking_type() {
+    return true;
+}
+
+Status BlockingAllocableDataStorageDriver::allocate_storage(FileInfo* fi){
+    ssize_t bytes_to_alloc = base_storage_driver->sizeof_content(fi);
+    std::unique_lock<std::mutex> ul(*mutex);
+    bool waited = false;
+    while(bytes_to_alloc + current_size > max_storage_size) {
+        //for spurious wakeup
+        if(!waited)
+            waiting++;
+        waited = true;
+        is_full->wait(ul);
+    }
+    if(waited)
+        waiting--;
+    current_size += bytes_to_alloc;
+    return {bytes_to_alloc};
+}
+
+Status BlockingAllocableDataStorageDriver::conditional_allocate_storage(FileInfo* fi){
+    ssize_t bytes_to_alloc = base_storage_driver->sizeof_content(fi);
+    if(bytes_to_alloc + current_size <= max_storage_size){
+        current_size += bytes_to_alloc;
+        return {bytes_to_alloc};
+    }else{
+        return {STORAGE_FULL};
+    }
+}
+
+Status BlockingAllocableDataStorageDriver::free_storage(FileInfo* fi){
+    ssize_t bytes_to_alloc = base_storage_driver->sizeof_content(fi);
+    std::unique_lock<std::mutex> ul(*mutex);
+    current_size -= bytes_to_alloc;
+    bool notify = waiting > 0;
+    ul.unlock();
+    if(notify)
+        is_full->notify_all();
+    return {bytes_to_alloc};
+}
+
+size_t BlockingAllocableDataStorageDriver::resize(size_t new_size){
+    std::unique_lock<std::mutex> ul(*mutex);
+    max_storage_size = new_size;
+    return new_size;
+}
+
+size_t BlockingAllocableDataStorageDriver::current_storage_size(){
+    std::unique_lock<std::mutex> ul(*mutex);
+    return current_size;
+}
+
+bool BlockingAllocableDataStorageDriver::becomesFull(FileInfo* fi){
+    std::unique_lock<std::mutex> ul(*mutex);
+    return base_storage_driver->sizeof_content(fi) + current_size >= max_storage_size;
+}
+
+std::vector<std::string> BlockingAllocableDataStorageDriver::configs() {
+    auto configs = AllocableDataStorageDriver::configs();
+    configs.push_back("Blocking: true\n");
+    return configs;
+}
+
+bool EventualAllocableDataStorageDriver::eventual_type(){
+    return true;
+}
+
+Status EventualAllocableDataStorageDriver::eventual_allocate_storage(FileInfo* fi){
+    ssize_t bytes_to_alloc = base_storage_driver->sizeof_content(fi);
+    if (bytes_to_alloc + placeholder_current_size > max_storage_size)
+        return {STORAGE_FULL};
+
+    placeholder_current_size += bytes_to_alloc;
+    return {bytes_to_alloc};
+}
+
+Status EventualAllocableDataStorageDriver::eventual_free_storage(FileInfo* fi){
+    ssize_t bytes_to_alloc = base_storage_driver->sizeof_content(fi);
+    placeholder_current_size -= bytes_to_alloc;
+    return {bytes_to_alloc};
+}
+
+size_t EventualAllocableDataStorageDriver::placeholder_current_storage_size(){
+    return placeholder_current_size;
+}
+
+bool EventualAllocableDataStorageDriver::eventual_becomesFull(FileInfo* fi){
+    return base_storage_driver->sizeof_content(fi) + placeholder_current_size >= max_storage_size;
+}
+
+std::vector<std::string> EventualAllocableDataStorageDriver::configs(){
+    auto configs = AllocableDataStorageDriver::configs();
+    configs.push_back("Eventual: true\n");
+    return configs;
 }

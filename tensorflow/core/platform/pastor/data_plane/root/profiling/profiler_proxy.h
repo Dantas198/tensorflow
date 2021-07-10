@@ -38,6 +38,7 @@ public:
     void submit_ordering(time_point<high_resolution_clock> start, time_point<high_resolution_clock> end) override;
     void submit_eviction(time_point<high_resolution_clock> start, time_point<high_resolution_clock> end) override;
     CollectedStats* collect() override;
+    bool is_activated();
 };
 
 

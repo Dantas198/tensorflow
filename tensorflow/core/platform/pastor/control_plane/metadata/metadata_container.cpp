@@ -11,7 +11,7 @@
 #include <dirent.h>
 
 #include "metadata_container.h"
-#include "../../data_plane/metadata/mutex_file_info.h"
+#include "../../data_plane/metadata/strict_file_info.h"
 
 MetadataContainer::MetadataContainer(const std::string& data_dir, const std::string& regex, int hierarchy_size, int epochs) {
     MetadataContainer::data_dir = data_dir;

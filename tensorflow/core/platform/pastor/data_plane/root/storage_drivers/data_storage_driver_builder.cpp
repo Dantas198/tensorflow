@@ -7,14 +7,22 @@
 
 DataStorageDriver* DataStorageDriverBuilder::build(){
     if (max_storage_size > 0){
-        auto* adsd = new AllocableDataStorageDriver(data_storage_driver);
-        adsd->max_storage_size = max_storage_size;
-        adsd->max_storage_occupation_threshold = threshold;
-        adsd->auto_storage_management = auto_storage_management;
-        return adsd;
+        AllocableDataStorageDriver* alloc_driver;
+        if(blocking_)
+            alloc_driver = new BlockingAllocableDataStorageDriver(data_storage_driver);
+        else
+            alloc_driver = new AllocableDataStorageDriver(data_storage_driver);
+        alloc_driver->max_storage_size = max_storage_size;
+        alloc_driver->max_storage_occupation_threshold = threshold;
+        return alloc_driver;
     }
     else
         return data_storage_driver;
+}
+
+DataStorageDriverBuilder& DataStorageDriverBuilder::with_hierarchy_level(int level){
+    data_storage_driver->level = level;
+    return *this;
 }
 
 DataStorageDriverBuilder& DataStorageDriverBuilder::with_block_size(size_t bs){
@@ -28,18 +36,15 @@ DataStorageDriverBuilder& DataStorageDriverBuilder::with_storage_prefix(const st
 }
 
 
-DataStorageDriverBuilder& DataStorageDriverBuilder::with_allocation_capabilities(size_t mss, float t){
+DataStorageDriverBuilder& DataStorageDriverBuilder::with_allocation_capabilities(size_t mss, float t, bool blocking){
     max_storage_size = mss;
     threshold = t;
+    blocking_ = blocking;
     return *this;
 }
 
-DataStorageDriverBuilder& DataStorageDriverBuilder::with_allocation_capabilities(size_t mss){
+DataStorageDriverBuilder& DataStorageDriverBuilder::with_allocation_capabilities(size_t mss, bool blocking){
     max_storage_size = mss;
-    return *this;
-}
-
-DataStorageDriverBuilder& DataStorageDriverBuilder::with_auto_storage_management(){
-    auto_storage_management = true;
+    blocking_ = blocking;
     return *this;
 }

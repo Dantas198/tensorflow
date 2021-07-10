@@ -37,24 +37,20 @@ bool ProfilerProxy::submitable(std::atomic<int>* counter){
 }
 
 void ProfilerProxy::submit_client_read(ReadSubmission* submission){
-    if(service_activated && submitable(&client_stats_update_counter))
+    if(submitable(&client_stats_update_counter))
         Profiler::submit_client_read(submission);
 }
 
 void ProfilerProxy::submit_read_on_storage(time_point<high_resolution_clock> start, time_point<high_resolution_clock> end, int level, size_t n){
-    if(service_activated) {
-        Profiler::submit_read_on_storage(level, n);
-        if (submitable(&storage_counters[level]->read_counter))
-            Profiler::submit_read_on_storage(start, end, level);
-    }
+    Profiler::submit_read_on_storage(level, n);
+    if (submitable(&storage_counters[level]->read_counter))
+        Profiler::submit_read_on_storage(start, end, level);
 }
 
 void ProfilerProxy::submit_write_on_storage(time_point<high_resolution_clock> start, time_point<high_resolution_clock> end, int level, size_t n){
-    if(service_activated) {
-        Profiler::submit_write_on_storage(level, n);
-        if (submitable(&storage_counters[level]->write_counter))
-            Profiler::submit_write_on_storage(start, end, level);
-    }
+    Profiler::submit_write_on_storage(level, n);
+    if (submitable(&storage_counters[level]->write_counter))
+        Profiler::submit_write_on_storage(start, end, level);
 }
 
 void ProfilerProxy::submit_ordering(time_point<high_resolution_clock> start, time_point<high_resolution_clock> end){
@@ -70,3 +66,7 @@ CollectedStats* ProfilerProxy::collect(){
         return Profiler::collect();
     return new CollectedStats();
 }
+
+bool ProfilerProxy::is_activated(){
+    return service_activated;
+};

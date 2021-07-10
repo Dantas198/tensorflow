@@ -34,7 +34,8 @@ class RemoteStageBuilder {
     int instance_identifier;
     int world_size;
     int number_of_workers;
-    MetadataContainerService* metadata_container;
+    int storage_source_level;
+    MetadataContainerService<FileInfo>* metadata_container;
     Configuration reply;
 
     std::shared_ptr<Channel> get_channel(const std::string &c_server_addr);
@@ -44,7 +45,7 @@ public:
     RemoteStageBuilder(const std::string &group, const std::string &c_server_addr, const std::string &dp_server_addr);
     //return configuration
     std::string get_configuration();
-    MetadataContainerService* get_metadata_container(const std::string& type);
+    MetadataContainerService<FileInfo>* get_metadata_container(const std::string& type, bool has_shareable_file_descriptors);
     int get_instance_identifier();
     int get_world_size();
     int get_number_of_workers();

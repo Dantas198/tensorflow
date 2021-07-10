@@ -35,14 +35,17 @@ void Logger::configure_service(const std::string &path, int unique_id) {
 
 
 void Logger::_write(const std::string &msg) {
-    if(configured) {
-        log_mutex.lock();
-        log << msg << std::endl;
-        log_mutex.unlock();
-    }
+    log_mutex.lock();
+    log << msg << std::endl;
+    log_mutex.unlock();
 }
 
+
+
 void Logger::thread_unsafe_write(const std::string& msg){
-    if(configured)
-        log << msg << std::endl;
+    log << msg << std::endl;
+}
+
+bool Logger::is_activated(){
+    return configured;
 }

@@ -9,7 +9,7 @@
 #include <string>
 #include <tuple>
 
-#include "root/profiling/stats.h"
+class CollectedStats;
 
 class DataPlane {
 public:

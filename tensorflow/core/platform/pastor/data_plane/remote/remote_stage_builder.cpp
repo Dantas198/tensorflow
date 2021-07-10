@@ -4,7 +4,7 @@
 
 #include <iostream>
 
-#include "../metadata/mutex_file_info.h"
+#include "../metadata/strict_file_info.h"
 #include "../metadata/placed_file_info.h"
 #include "remote_stage_builder.h"
 
@@ -25,7 +25,7 @@ RemoteStageBuilder::RemoteStageBuilder(const std::string &group, const std::stri
     RemoteStageBuilder::group = group;
     RemoteStageBuilder::instance_identifier = -1;
     RemoteStageBuilder::dp_server_addr = dp_server_addr;
-    RemoteStageBuilder::metadata_container = new MetadataContainerService();
+    RemoteStageBuilder::metadata_container = new MetadataContainerService<FileInfo>();
 }
 
 std::shared_ptr<Channel> RemoteStageBuilder::get_channel(const std::string &c_server_addr) {
@@ -68,6 +68,8 @@ void RemoteStageBuilder::build_partial_metadata_container(Configuration& reply) 
     metadata_container->set_epochs(metadata.epochs());
     metadata_container->set_storage_source_level(metadata.storage_source_level());
 
+    storage_source_level = metadata.storage_source_level();
+
     for (auto &target_info : metadata.targets_info())
         metadata_container->add_target_class_to_id(target_info.name(), target_info.id());
 
@@ -84,14 +86,14 @@ void RemoteStageBuilder::build_partial_metadata_container(Configuration& reply) 
         metadata_container->generate_samples_ordered_ids();
 }
 
-MetadataContainerService* RemoteStageBuilder::get_metadata_container(const std::string& type){
+MetadataContainerService<FileInfo>* RemoteStageBuilder::get_metadata_container(const std::string& type, bool has_shareable_file_descriptors){
     auto &metadata = reply.metadata();
 
     for (auto &cfi : metadata.file_infos()) {
         if (type == "root_standalone")
-            metadata_container->add_entry(cfi.id(), new PlacedFileInfo(cfi.name(), cfi.size(), cfi.target()));
+            metadata_container->add_entry(cfi.id(), new PlacedFileInfo(cfi.name(), cfi.size(), storage_source_level, has_shareable_file_descriptors, cfi.target()));
         else
-            metadata_container->add_entry(cfi.id(), new MutexFileInfo(cfi.name(), cfi.size(), cfi.target()));
+            metadata_container->add_entry(cfi.id(), new StrictFileInfo(cfi.name(), cfi.size(), storage_source_level, has_shareable_file_descriptors, cfi.target()));
     }
     std::cout << "Inserted " << metadata.file_infos().size() << " metadata entries";
     return metadata_container;

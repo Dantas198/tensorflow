@@ -57,13 +57,19 @@ HierarchicalDataPlaneBuilder& HierarchicalDataPlaneBuilder::with_debug_enabled(c
     return *this;
 }
 
-HierarchicalDataPlaneBuilder& HierarchicalDataPlaneBuilder::with_metadata_container(MetadataContainerService* mdc){
+HierarchicalDataPlaneBuilder& HierarchicalDataPlaneBuilder::with_metadata_container(MetadataContainerService<FileInfo>* mdc){
     data_plane->metadata_container = mdc;
     return *this;
 }
 
+HierarchicalDataPlaneBuilder& HierarchicalDataPlaneBuilder::with_client_watch_rate_limit(int size){
+    data_plane->rate_limiter = new ClientWatchRateLimiter(size);
+    return *this;
+}
+
+//TODO fix rate limiters object hierarchy
 HierarchicalDataPlaneBuilder& HierarchicalDataPlaneBuilder::with_batch_rate_limit(int size) {
-    data_plane->rate_limiter = new RateLimiter(size);
+    //data_plane->rate_limiter = new RateLimiter(size);
     return *this;
 }
 

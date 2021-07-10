@@ -8,14 +8,17 @@
 #include <thread>
 #include <vector>
 #include <atomic>
+#include "rate_limiting/rate_limiter.h"
+#include "rate_limiting/client_watch_rate_limiter.h"
+#include "storage_drivers/data_storage_driver.h"
+#include "storage_drivers/file_system_driver.h"
+#include "profiling/profiler_proxy.h"
 #include "../data_plane.h"
-#include "../../helpers/logger.h"
+#include "../metadata/placed_file_info.h"
 #include "../metadata/metadata_container_service.h"
 #include "../metadata/file.h"
-#include "rate_limiting/rate_limiter.h"
-#include "storage_drivers/data_storage_driver.h"
-#include "profiling/profiler_proxy.h"
-
+#include "../../helpers/logger.h"
+#include "../policies.h"
 #if defined BAZEL_BUILD || defined TF_BAZEL_BUILD
 #include "third_party/ctpl/ctpl.h"
 #else
@@ -23,6 +26,7 @@
 #endif
 
 class HierarchicalDataPlaneBuilder;
+class ControlHandler;
 
 class HierarchicalDataPlane : public DataPlane{
     int neighbours_index;
@@ -33,13 +37,7 @@ class HierarchicalDataPlane : public DataPlane{
     int total_used_threads;
     std::vector<ctpl::thread_pool*> storage_hierarchy_thread_pools;
     std::vector<std::vector<DataStorageDriver*>> storage_hierarchical_matrix;
-    RateLimiter* rate_limiter;
-    //TODO it's only on synchronize for now.
-    bool reached_stability;
-
-    explicit HierarchicalDataPlane(int instance_id, int world_size, int number_of_workers, int hierarchy_size);
-    int get_storage_hierarchical_matrix_index(int rank, int worker_id);
-
+    ClientWatchRateLimiter* rate_limiter;
 protected:
     // TODO for prefetching. If application_id not defined use instance_id.
     int instance_id;
@@ -48,37 +46,38 @@ protected:
     int worker_id;
     int num_workers;
     Logger* debug_logger;
-    int storage_hierarchy_size;
-    MetadataContainerService* metadata_container;
-    ctpl::thread_pool* housekeeper_thread_pool;
+    MetadataContainerService<FileInfo>* metadata_container;
     ctpl::thread_pool* synchronization_thread_pool;
-    std::atomic<int> placed_samples;
     ProfilerProxy* profiler;
+    ControlPolicy control_policy;
+    PlacementPolicy placement_policy;
+    ControlHandler* control_handler;
+public:
+    std::atomic<int> placed_samples;
+    int storage_hierarchy_size;
+    bool reached_stability;
+    bool becomes_full;
+    ctpl::thread_pool* housekeeper_thread_pool;
 
-    HierarchicalDataPlane(HierarchicalDataPlane* hdp);
+private:
+    explicit HierarchicalDataPlane(int instance_id, int world_size, int number_of_workers, int hierarchy_size);
+    int get_storage_hierarchical_matrix_index(int rank, int worker_id);
+    Status base_read_from_storage(FileInfo* fi, char* result, uint64_t offset, size_t n, int level);
+    ssize_t base_read(FileInfo* fi, char* result, uint64_t offset, size_t n);
+
+protected:
+    explicit HierarchicalDataPlane(HierarchicalDataPlane* hdp);
     int free_level(int rank, int worker_id, FileInfo* fi, int offset);
     bool is_allocable(int rank, int worker_id, int level);
     AllocableDataStorageDriver* get_alloc_driver(int rank, int worker_id, int level);
     DataStorageDriver* get_driver(int rank, int worker_id, int level);
-    int free_level(FileInfo* fi, int offset);
-    bool is_allocable(int level);
-    AllocableDataStorageDriver* get_alloc_driver(int level);
     DataStorageDriver* get_driver(int level);
-    ctpl::thread_pool* t_pool(int storage_index);
-    Status write(File* f, int level);
-    Status read(File* f, int level);
-    Status remove(FileInfo* fi, int level);
     bool enforce_rate_limit();
-    void enforce_rate_brake(int new_brake_id);
-    void enforce_rate_continuation(int new_brake_release_id);
-    void apply_job_termination();
     void await_termination();
     void set_total_jobs(int iter_size);
-    virtual void debug_write(const std::string& msg);
     ssize_t read(FileInfo* fi, char* result, uint64_t offset, size_t n);
     int get_list_index(int rank, int worker_id, int index);
     void synchronize_storages(int offset);
-    void handle_placement(File* f);
     void start_sync_loop(int offset);
 
 public:
@@ -99,6 +98,44 @@ public:
     int get_file_count() override;
     CollectedStats* collect_statistics() override;
     void set_distributed_params(int rank, int worker_id) override;
+
+    void enforce_rate_brake(int new_brake_id);
+
+    void apply_job_termination();
+    void apply_job_start();
+
+    bool is_file_system(int level);
+    FileSystemDriver* get_fs_driver(int level);
+    AllocableDataStorageDriver* get_alloc_driver(int level);
+    BlockingAllocableDataStorageDriver* get_blocking_alloc_driver(int level);
+    EventualAllocableDataStorageDriver* get_eventual_alloc_driver(int level);
+
+    bool is_allocable(int level);
+    bool is_blocking(int level);
+
+    ctpl::thread_pool* t_pool(int storage_index);
+
+    int free_level(FileInfo* fi, int offset);
+    int eventual_free_level(FileInfo* fi, int offset);
+    bool is_eventual(int level);
+
+    int alloc_free_level(FileInfo* fi, int offset);
+
+    Status read_from_storage(File* f, int level);
+    Status read_from_storage(FileInfo* fi, char* result, uint64_t offset, size_t n, int level);
+
+    Status remove(FileInfo* fi, int level);
+
+    File* remove_for_copy(FileInfo* fi, int level);
+
+    Status write(File* f, int level);
+
+    void enforce_rate_continuation(int new_brake_release_id);
+
+    void make_blocking_drivers();
+    void make_eventual_drivers();
+
+    virtual void debug_write(const std::string& msg);
 };
 
 #endif // BASIC_CONTROLLER_H

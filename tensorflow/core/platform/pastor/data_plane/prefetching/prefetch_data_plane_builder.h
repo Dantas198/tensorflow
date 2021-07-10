@@ -9,18 +9,27 @@
 
 class PrefetchDataPlaneBuilder  {
     PrefetchDataPlane* data_plane;
+    ControlPolicy control_policy;
+    ReadPolicy read_policy;
+    PlacementPolicy placement_policy;
+    EvictCallType evict_call_type;
 
 public:
     explicit PrefetchDataPlaneBuilder(HierarchicalDataPlane* root_data_plane){
         data_plane = new PrefetchDataPlane(root_data_plane);
+        control_policy = LOCK_ORDERED;
+        read_policy = WAIT_ENFORCED;
+        placement_policy = FIRST_LEVEL_ONLY;
+        evict_call_type = CLIENT;
     };
-
-    operator DataPlane*() const {return data_plane;}
 
     DataPlane* build();
     PrefetchDataPlaneBuilder& with_eviction_percentage(float percentage);
     PrefetchDataPlaneBuilder& with_prefetch_thread_pool_size(int size);
-    PrefetchDataPlaneBuilder& with_placement_strategy(std::string type);
+    PrefetchDataPlaneBuilder& with_control_policy(ControlPolicy cp);
+    PrefetchDataPlaneBuilder& with_read_policy(ReadPolicy rp);
+    PrefetchDataPlaneBuilder& with_placement_policy(PlacementPolicy pp);
+    PrefetchDataPlaneBuilder& with_evict_call_type(EvictCallType ect);
     PrefetchDataPlaneBuilder& configurations();
     PrefetchDataPlaneBuilder& policies();
 };

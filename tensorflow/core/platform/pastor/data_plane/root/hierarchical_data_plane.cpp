@@ -10,7 +10,7 @@
 
 #include "hierarchical_data_plane.h"
 #include "hierarchical_data_plane_builder.h"
-#include "../metadata/placed_file_info.h"
+#include "../handlers/control_handler.h"
 
 HierarchicalDataPlaneBuilder* HierarchicalDataPlane::create(int instance_id_, int world_size_, int number_of_workers, int hierarchy_size){
     return new HierarchicalDataPlaneBuilder{instance_id_, world_size_, number_of_workers, hierarchy_size};
@@ -32,7 +32,10 @@ HierarchicalDataPlane::HierarchicalDataPlane(int id, int ws, int nw, int hierarc
     total_used_threads = 0;
     shared_thread_pool = false;
     debug_logger = new Logger();
-    rate_limiter = nullptr;
+    rate_limiter = new ClientWatchRateLimiter(-1);
+    control_policy = SOLO_PLACEMENT;
+    placement_policy = PUSH_DOWN;
+    control_handler = new ControlHandler(this, control_policy, placement_policy);
     profiler = nullptr;
 }
 
@@ -58,6 +61,7 @@ HierarchicalDataPlane::HierarchicalDataPlane(HierarchicalDataPlane* hdp){
     debug_logger = hdp->debug_logger;
     rate_limiter = hdp->rate_limiter;
     profiler = hdp->profiler;
+    control_handler = hdp->control_handler;
     type = hdp->type;
 }
 
@@ -82,11 +86,23 @@ int HierarchicalDataPlane::get_storage_hierarchical_matrix_index(int rank_, int 
 
 //ignores worker_id for now
 //TODO stability should be reached when all storage level are 99.99% full and not related to index.
-//THe if is kind of strange, but for now does no harm
+//The if is kind of strange, but for now does no harm
 int HierarchicalDataPlane::get_list_index(int rank_, int worker_id_, int local_index){
     if(local_index == metadata_container->get_file_count() - 1)
         reached_stability = true;
     return metadata_container->get_id(rank_, local_index);
+}
+
+bool HierarchicalDataPlane::is_file_system(int level){
+    return storage_hierarchical_matrix[matrix_index][level]->file_system_type();
+}
+
+FileSystemDriver* HierarchicalDataPlane::get_fs_driver(int level){
+    auto* driver = storage_hierarchical_matrix[matrix_index][level];
+    if(driver->alloc_type()){
+        return (FileSystemDriver*)(((AllocableDataStorageDriver*)driver)->get_base_storage_driver());
+    }
+    return (FileSystemDriver*)driver;
 }
 
 bool HierarchicalDataPlane::is_allocable(int rank_, int worker_id_, int level){
@@ -98,6 +114,22 @@ bool HierarchicalDataPlane::is_allocable(int level){
     return storage_hierarchical_matrix[matrix_index][level]->alloc_type();
 }
 
+bool HierarchicalDataPlane::is_blocking(int level){
+    auto* driver = storage_hierarchical_matrix[matrix_index][level];
+    if(driver->alloc_type()){
+        return ((AllocableDataStorageDriver*)driver)->blocking_type();
+    }
+    return false;
+}
+
+bool HierarchicalDataPlane::is_eventual(int level){
+    auto* driver = storage_hierarchical_matrix[matrix_index][level];
+    if(driver->alloc_type()){
+        return ((AllocableDataStorageDriver*)driver)->eventual_type();
+    }
+    return false;
+}
+
 AllocableDataStorageDriver* HierarchicalDataPlane::get_alloc_driver(int rank_, int worker_id_, int level){
     int line = get_storage_hierarchical_matrix_index(rank_, worker_id_);
     return (AllocableDataStorageDriver*)storage_hierarchical_matrix[line][level];
@@ -105,6 +137,10 @@ AllocableDataStorageDriver* HierarchicalDataPlane::get_alloc_driver(int rank_, i
 
 AllocableDataStorageDriver* HierarchicalDataPlane::get_alloc_driver(int level){
     return (AllocableDataStorageDriver*)storage_hierarchical_matrix[matrix_index][level];
+}
+
+BlockingAllocableDataStorageDriver* HierarchicalDataPlane::get_blocking_alloc_driver(int level){
+    return (BlockingAllocableDataStorageDriver*)storage_hierarchical_matrix[matrix_index][level];
 }
 
 DataStorageDriver* HierarchicalDataPlane::get_driver(int rank_, int worker_id_, int level){
@@ -127,9 +163,32 @@ int HierarchicalDataPlane::free_level(int rank_, int worker_id_, FileInfo* fi, i
     return -1;
 }
 
+//TODO more generic
+int HierarchicalDataPlane::alloc_free_level(FileInfo* fi, int offset){
+    for(int i = offset; i < storage_hierarchy_size - 1; i++) {
+        if (get_alloc_driver(i)->conditional_allocate_storage(fi).state != STORAGE_FULL) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 int HierarchicalDataPlane::free_level(FileInfo* fi, int offset){
     for(int i = offset; i < storage_hierarchy_size - 1; i++) {
-        if (is_allocable(i) && !get_alloc_driver(i)->becomesFull(fi)) {
+        if (!get_alloc_driver(i)->becomesFull(fi)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+EventualAllocableDataStorageDriver* HierarchicalDataPlane::get_eventual_alloc_driver(int level){
+    return (EventualAllocableDataStorageDriver*)storage_hierarchical_matrix[matrix_index][level];
+}
+
+int HierarchicalDataPlane::eventual_free_level(FileInfo* fi, int offset){
+    for(int i = offset; i < storage_hierarchy_size - 1; i++) {
+        if (!get_eventual_alloc_driver(i)->eventual_becomesFull(fi)) {
             return i;
         }
     }
@@ -151,7 +210,7 @@ void HierarchicalDataPlane::synchronize_storages(int offset){
                             int level = free_level(r, w, fi, offset);
                             if (level > 0) {
                                 get_alloc_driver(r, w, level)->allocate_storage(fi);
-                                fi->set_storage_level(level);
+                                fi->loaded_to(level);
                             }
                         }
                     }
@@ -163,80 +222,75 @@ void HierarchicalDataPlane::synchronize_storages(int offset){
     }
 }
 
-void HierarchicalDataPlane::handle_placement(File* f){
-
-    int storage_level = f->get_info()->get_storage_level();
-    // f came from source
-    if (storage_level == storage_hierarchy_size - 1){
-        // search for a storage level with empty space except the last level
-        int level = free_level(rank, worker_id, f->get_info(), 0);
-        if (level >= 0){
-            debug_write(f->get_info()->get_name() + " came from source. Found storage space on level: " +
-                        std::to_string(level));
-            get_alloc_driver(rank, worker_id, level)->allocate_storage(f->get_info());
-            t_pool(level)->push([this, level, f](int id){
-                //get info so that drivers can safely delete f
-                auto* fi = f->get_info();
-                if(f->get_requested_size() < fi->_get_size()){
-                    debug_write(f->get_info()->get_name() + " is a partial request. Reshaping to full request for placement");
-                    f->reshape_to_full_request();
-                    read(f, fi->get_storage_level());
-                }
-                Status status = write(f, level);
-                placed_samples++;
-                if(!get_alloc_driver(rank, worker_id, level)->in_memory_type())
-                    delete f;
-
-                if (status.state == SUCCESS) {
-                    debug_write(fi->get_name() + " placed on level: " + std::to_string(level));
-                    fi->set_storage_level(level);
-                }
-            });
-        }
-        else{
-            debug_write(f->get_info()->get_name() + " came from source. No storage space in any level for " +
-                        f->get_info()->get_name());
-            delete f;
-        }
-    }else
-        delete f;
-}
-
 std::string HierarchicalDataPlane::decode_filename(std::string full_path){
     return full_path.erase(0, get_driver(storage_hierarchy_size -1)->prefix().length() + 1);
 }
 
-ssize_t HierarchicalDataPlane::read(FileInfo* fi, char* result, uint64_t offset, size_t n){
-    auto* read_submission = new ReadSubmission();
-    read_submission->r_start = std::chrono::high_resolution_clock::now();
-
+ssize_t HierarchicalDataPlane::base_read(FileInfo* fi, char* result, uint64_t offset, size_t n){
     if(offset >= fi->_get_size()) {
-        debug_write("Tried to read from offset: " + std::to_string(offset) + " which goes beond file size: " +
+        if(debug_logger->is_activated())
+            debug_write("Tried to read from offset: " + std::to_string(offset) + " which goes beond file size: " +
                     std::to_string(fi->_get_size()) + " name: " + fi->get_name());
         return 0;
     }
 
-    auto* f = new File(fi, offset, n);
-    auto* pfi = (PlacedFileInfo*)fi;
-    debug_write("reading file " + pfi->get_name() + " from level " +
-                std::to_string(pfi->get_storage_level()));
+    int storage_level = fi->get_storage_level();
+    size_t requested_size = n + offset > fi->_get_size() ? fi->_get_size() - offset : n;
 
-    Status read_status = read(f, pfi->get_storage_level());
+    if(debug_logger->is_activated())
+        debug_write("client reading from level " +
+                    std::to_string(storage_level) + 
+                    " file " + fi->get_name() + 
+                    " with offset: " +
+                    std::to_string(offset) + " and size: " + std::to_string(requested_size));
+
+    if(fi->has_shareable_file_descriptors() && is_file_system(storage_level)){
+        get_fs_driver(storage_level)->open_descriptor(fi, true);
+    }
+    Status read_status = read_from_storage(fi, result, offset, requested_size, storage_level);
+    //Started reading must be called after read so that the first read opens de file if fs driver.
     if(read_status.state == SUCCESS) {
-        memcpy(result, f->get_content(), f->get_requested_size());
-        //result is in buffer, writter thread will manage the created file deletion
-        if(pfi->get_storage_level() == storage_hierarchy_size - 1 && pfi->begin_placement()) {
-            housekeeper_thread_pool->push([this, f](int id) {
-                handle_placement(f);
-            });
-        } else {
-            delete f;
+        if(control_handler->check_placement_validity(dynamic_cast<PlacedFileInfo*>(fi))){
+            auto* f = new File(fi, offset, requested_size);
+            if(f->is_full_read()){
+                memcpy(f->get_content(), result, requested_size);
+            }
+            control_handler->place(f);
         }
     }
-    read_submission->r_end = std::chrono::high_resolution_clock::now();
-    read_submission->n = n;
-    profiler->submit_client_read(read_submission);
+    //TODO this mechanism needs to be added with prefetch + relaxed read
+    if(fi->has_shareable_file_descriptors()){
+        if(offset + requested_size >= fi->_get_size() && is_file_system(storage_level)){
+            fi->client_ended_read(storage_level);
+            get_fs_driver(storage_level)->close_descriptor(fi);
+        }
+        if(fi->storage_changed()){
+            //To prevent close without open
+            if(fi->get_file_descriptor(fi->get_last_storage_read()) != -1) {
+                fi->client_ended_read(fi->get_last_storage_read());
+                get_fs_driver(fi->get_last_storage_read())->close_descriptor(fi);
+            }
+            fi->update_last_storage_read();
+        }
+    }
     return read_status.bytes_size;
+}
+
+ssize_t HierarchicalDataPlane::read(FileInfo* fi, char* result, uint64_t offset, size_t n){
+    ssize_t bytes_size = 0;
+    if(profiler->is_activated()) {
+        auto *read_submission = new ReadSubmission();
+        read_submission->r_start = std::chrono::high_resolution_clock::now();
+
+        bytes_size = base_read(fi, result, offset, n);
+
+        read_submission->r_end = std::chrono::high_resolution_clock::now();
+        read_submission->n = n;
+        profiler->submit_client_read(read_submission);
+    }else{
+        bytes_size = base_read(fi, result, offset, n);
+    }
+    return bytes_size;
 }
 
 ssize_t HierarchicalDataPlane::read(const std::string& filename, char* result, uint64_t offset, size_t n) {
@@ -273,40 +327,64 @@ int HierarchicalDataPlane::get_target_class(const std::string &filename){
 //TODO encapsulate inside other member function to enable frequency
 
 Status HierarchicalDataPlane::write(File* f, int level){
-    auto st = std::chrono::high_resolution_clock::now();
-    auto status = storage_hierarchical_matrix[matrix_index][level]->write(f);
-    auto et = std::chrono::high_resolution_clock::now();
-    profiler->submit_write_on_storage(st, et, level, f->get_requested_size());
-    return status;
+    Status s = SUCCESS;
+    if(profiler->is_activated()){
+        auto st = std::chrono::high_resolution_clock::now();
+        s = storage_hierarchical_matrix[matrix_index][level]->write(f);
+        auto et = std::chrono::high_resolution_clock::now();
+        profiler->submit_write_on_storage(st, et, level, f->get_requested_size());
+    }else{
+        s = storage_hierarchical_matrix[matrix_index][level]->write(f);
+    }
+    return s;
 }
 
-//TODO if not found go to lower level
-Status HierarchicalDataPlane::read(File* f, int level){
-    auto st = std::chrono::high_resolution_clock::now();
+Status HierarchicalDataPlane::base_read_from_storage(FileInfo* fi, char* result, uint64_t offset, size_t n, int level){
     Status s = NOT_FOUND;
     int found_level = level;
     while(s.state == NOT_FOUND && found_level < storage_hierarchy_size){
-        s = storage_hierarchical_matrix[matrix_index][level]->read(f);
+        s = storage_hierarchical_matrix[matrix_index][found_level]->read(fi, result, offset, n);
         if(s.state == NOT_FOUND)
             found_level += 1;
     }
     if(s.state == NOT_FOUND){
-        std::cout << "File could not be found anywhere exiting...\n";
+        std::cerr << "File : " << fi->get_name() << "could not be found anywhere. Request level: " + std::to_string(level) + " max level permitted: " +
+        std::to_string(found_level) + "exiting...\n";
         exit(1);
     }
 
     if (found_level != level) {
         s = MISS;
-        f->get_info()->set_storage_level(found_level);
-        debug_write("Cache miss. Target level: " + std::to_string(level) + " Actual level: " + std::to_string(found_level));
+        //f->get_info()->set_storage_level(found_level);
+        if(debug_logger->is_activated())
+            debug_write("Cache miss. Target level: " + std::to_string(level) + " Actual level: " + std::to_string(found_level));
     }
-    auto et = std::chrono::high_resolution_clock::now();
-    profiler->submit_read_on_storage(st, et, level, f->get_requested_size());
     return s;
+}
+
+Status HierarchicalDataPlane::read_from_storage(FileInfo* fi, char* result, uint64_t offset, size_t n, int level){
+    Status s = NOT_FOUND;
+    if(profiler->is_activated()){
+        auto st = std::chrono::high_resolution_clock::now();
+        s = base_read_from_storage(fi, result, offset, n, level);
+        auto et = std::chrono::high_resolution_clock::now();
+        profiler->submit_read_on_storage(st, et, level, n);
+    }else{
+        s = base_read_from_storage(fi, result, offset, n, level);
+    }
+    return s;
+}
+
+Status HierarchicalDataPlane::read_from_storage(File* f, int level){
+    return read_from_storage(f->get_info(), f->get_content(), f->get_offset(), f->get_requested_size(), level);
 }
 
 Status HierarchicalDataPlane::remove(FileInfo* fi, int level){
     return storage_hierarchical_matrix[matrix_index][level]->remove(fi);
+}
+
+File* HierarchicalDataPlane::remove_for_copy(FileInfo* fi, int level){
+    return storage_hierarchical_matrix[matrix_index][level]->remove_for_copy(fi);
 }
 
 bool HierarchicalDataPlane::enforce_rate_limit(){
@@ -316,19 +394,28 @@ bool HierarchicalDataPlane::enforce_rate_limit(){
 }
 
 void HierarchicalDataPlane::enforce_rate_brake(int new_brake_id){
-    if(rate_limiter != nullptr) {
-        rate_limiter->pull_brake(new_brake_id);
-    }
+    std::cerr << "Method not available" << std::endl;
+    exit(1);
+    //if(rate_limiter != nullptr) {
+     //   rate_limiter->pull_brake(new_brake_id);
+    ///}
 }
 
 void HierarchicalDataPlane::enforce_rate_continuation(int new_brake_release_id){
-    if(rate_limiter != nullptr)
-        rate_limiter->release_brake(new_brake_release_id);
+    std::cerr << "Method not available" << std::endl;
+    exit(1);
+    //if(rate_limiter != nullptr)
+      //  rate_limiter->release_brake(new_brake_release_id);
 }
 
 void HierarchicalDataPlane::apply_job_termination() {
     if(rate_limiter != nullptr)
         rate_limiter->apply_job_termination();
+}
+
+void HierarchicalDataPlane::apply_job_start(){
+    if(rate_limiter != nullptr)
+        rate_limiter->apply_job_start();
 }
 
 void HierarchicalDataPlane::await_termination(){
@@ -341,12 +428,13 @@ void HierarchicalDataPlane::set_total_jobs(int iter_size){
         rate_limiter->set_total_jobs(iter_size);
 }
 
-
 void HierarchicalDataPlane::init(){
-    debug_write("Setting metadata container instance id...");
+    if(debug_logger->is_activated())
+        debug_write("Setting metadata container instance id...");
     if(world_size > 1 || num_workers > 1) {
         metadata_container->make_partition(rank, world_size, worker_id, num_workers);
-        debug_write("Metadatada container has partitioned file count set to: " + std::to_string(metadata_container->get_file_count()));
+        if(debug_logger->is_activated())
+            debug_write("Metadatada container has partitioned file count set to: " + std::to_string(metadata_container->get_file_count()));
 
         for(int w = 0; w < num_workers; w++){
             for(int r = 0; r < world_size; r++){
@@ -360,7 +448,8 @@ void HierarchicalDataPlane::init(){
                 }
             }
         }
-        debug_write("Allocable drivers max_storage_size have been resized according to the given partition");
+        if(debug_logger->is_activated())
+            debug_write("Allocable drivers max_storage_size have been resized according to the given partition");
     }
     if(instance_id == 0){
         //ignore source level
@@ -368,7 +457,26 @@ void HierarchicalDataPlane::init(){
         for(int i = 0; i < storage_hierarchy_size - 1; i++){
             (storage_hierarchical_matrix[matrix_index][i])->create_environment(dirs);
         }
-        debug_write("Instance 0 created storage environment");
+        if(debug_logger->is_activated())
+            debug_write("Instance 0 created storage environment");
+    }
+
+    //TODO take this out of here. logic in the wrong place
+    if(storage_hierarchy_size > 1) {
+        if (placement_policy == PUSH_DOWN) {
+            size_t full_capacity = 0;
+            for (int i = 0; i < storage_hierarchy_size - 1; i++) {
+                if (is_allocable(i)) {
+                    full_capacity += get_alloc_driver(i)->get_max_storage_size();
+                }
+            }
+            becomes_full = metadata_container->get_full_size() > full_capacity;
+        } else {
+            becomes_full = metadata_container->get_full_size() > get_alloc_driver(0)->get_max_storage_size();
+        }
+        std::string b_f = becomes_full ? "true" : "false";
+        if(debug_logger->is_activated())
+            debug_write("First storage level becomes full: " + b_f );
     }
 }
 
@@ -382,7 +490,11 @@ void HierarchicalDataPlane::start(){
         worker_id = 0;
     }
 
+    //TODO this semantic is weird. Make it better!
+    control_handler->prepare_environment();
+    /* TODO
     synchronization_thread_pool->push([this](int id){start_sync_loop(0);});
+     */
 }
 
 //TODO use decent method -> stats.h
@@ -420,6 +532,22 @@ void HierarchicalDataPlane::print(){
 
 int HierarchicalDataPlane::get_file_count(){
     return metadata_container->get_file_count();
+}
+
+void HierarchicalDataPlane::make_blocking_drivers(){
+    for(int i = 0; i < storage_hierarchy_size - 1; i++){
+        if(is_allocable(i)){
+            storage_hierarchical_matrix[matrix_index][i] = new BlockingAllocableDataStorageDriver(get_alloc_driver(i));
+        }
+    }
+}
+
+void HierarchicalDataPlane::make_eventual_drivers(){
+    for(int i = 0; i < storage_hierarchy_size - 1; i++){
+        if(is_allocable(i)){
+            storage_hierarchical_matrix[matrix_index][i] = new EventualAllocableDataStorageDriver(get_alloc_driver(i));
+        }
+    }
 }
 
 CollectedStats* HierarchicalDataPlane::collect_statistics(){

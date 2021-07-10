@@ -13,33 +13,34 @@
 #define DEBUG_DIR "/debugger"
 #define PROFILER_DIR "/profiler"
 
-DataStorageDriver* ConfigurationParser::parseStorageDriver(YAML::Node driver){
+DataStorageDriver* ConfigurationParser::parseStorageDriver(YAML::Node driver, YAML::Node configs, int level){
     //default is disk
-    DataStorageDriverBuilder storage_builder = DataStorageDriver::create(DISK);
+    DataStorageDriverBuilder storage_builder = DataStorageDriver::create(FILE_SYSTEM);
 
     auto storage_type = driver["type"].as<std::string>();
 
-    if (storage_type == "blocking_memory_buffer")
-        storage_builder = DataStorageDriver::create(BLOCKING_MEMORY_BUFFER);
-
-    else if (storage_type == "disk"){
-        if(!driver["block_size"].IsNull())
+    if (storage_type == "tbb_memory_buffer")
+        storage_builder = DataStorageDriver::create(TBB_MEMORY_BUFFER);
+    else if (storage_type == "ph_memory_buffer")
+        storage_builder = DataStorageDriver::create(PH_MEMORY_BUFFER);
+    else if (storage_type == "file_system"){
+        if(driver["block_size"])
             storage_builder.with_block_size(driver["block_size"].as<int>());
         storage_builder.with_storage_prefix(driver["prefix"].as<std::string>());
     }
-    else
+    else {
         std::cerr << "storage driver type not supported\n";
-
+        exit(1);
+    }
     YAML::Node mss = driver["max_storage_size"];
     YAML::Node msot = driver["max_storage_occupation_threshold"];
 
     if(mss && msot){
-        storage_builder.with_allocation_capabilities(mss.as<size_t>(), msot.as<float>());
+        storage_builder.with_allocation_capabilities(mss.as<size_t>(), msot.as<float>(), false);
     }else if (mss)
-        storage_builder.with_allocation_capabilities(mss.as<size_t>());
+        storage_builder.with_allocation_capabilities(mss.as<size_t>(), false);
 
-    if(driver["auto"] && driver["auto"].as<std::string>() == "true")
-        storage_builder.with_auto_storage_management();
+    storage_builder.with_hierarchy_level(level);
 
     return storage_builder.build();
 }
@@ -95,7 +96,7 @@ HierarchicalDataPlaneBuilder* ConfigurationParser::parseHierarchicalDataPlaneBui
         matrix.push_back(drivers);
         for(int i = 0; i < hierarchy.size(); i++) {
             auto driver = hierarchy[i];
-            matrix[j].push_back(parseStorageDriver(driver));
+            matrix[j].push_back(parseStorageDriver(driver, configs, i));
         }
     }
     builder->with_storage_hierarchy(matrix);
@@ -122,6 +123,12 @@ HierarchicalDataPlaneBuilder* ConfigurationParser::parseHierarchicalDataPlaneBui
                 std::cerr << "define a batch size for the batch rate limiter\n";
             else
                 builder->with_batch_rate_limit(b_size.as<int>());
+        } else if(type == "client_watch"){
+            auto b_size = r_limiter["limit_size"];
+            if(!b_size)
+                std::cerr << "define a limit size for the client watch rate limiter\n";
+            else
+                builder->with_client_watch_rate_limit(b_size.as<int>());
         }
         else
             std::cerr << "rate limiter type not supported\n";
@@ -131,15 +138,86 @@ HierarchicalDataPlaneBuilder* ConfigurationParser::parseHierarchicalDataPlaneBui
         builder->with_debug_enabled(root_configs["home_dir"].as<std::string>() + DEBUG_DIR, rbuilder->get_instance_identifier());
 
     auto type = configs["type"].as<std::string>();
-    builder->with_metadata_container(rbuilder->get_metadata_container(type));
+    auto has_shareable_file_descriptors = false;
+    if(configs["has_shareable_file_descriptors"] && configs["has_shareable_file_descriptors"].as<std::string>() == "true") {
+        has_shareable_file_descriptors = true;
+    }
+    builder->with_metadata_container(rbuilder->get_metadata_container(type, has_shareable_file_descriptors ));
     builder->with_type(type);
     builder->with_profiling_enabled(parseProfiler(root_configs));
     return builder;
 }
 
+ControlPolicy ConfigurationParser::parse_control_policy(YAML::Node type_configs){
+    if(type_configs["control_policy"]){
+        std::string pol = type_configs["control_policy"].as<std::string>();
+        if(pol == "lock_ordered")
+            return LOCK_ORDERED;
+        else if(pol == "queue_ordered")
+            return QUEUE_ORDERED;
+        else if(pol== "single_thread_ordered")
+            return SINGLE_THREAD_ORDERED;
+        else if(pol == "solo_placement")
+            return SOLO_PLACEMENT;
+        else {
+            std::cerr << "Bad control policy\n";
+            exit(1);
+        }
+    }else{
+        return LOCK_ORDERED;
+    }
+}
+
+PlacementPolicy ConfigurationParser::parse_placement_policy(YAML::Node type_configs){
+    if(type_configs["placement_policy"]){
+        std::string pol = type_configs["placement_policy"].as<std::string>();
+        if(pol == "push_down")
+            return PUSH_DOWN;
+        else if(pol == "first_level_only")
+            return FIRST_LEVEL_ONLY;
+        else{
+            std::cerr << "Bad placement policy\n";
+            exit(1);
+        }
+    }else{
+        return PUSH_DOWN;
+    }
+}
+
+ReadPolicy ConfigurationParser::parse_read_policy(YAML::Node type_configs){
+    if(type_configs["read_policy"]){
+        std::string strat = type_configs["read_policy"].as<std::string>();
+        if(strat == "wait_enforced")
+            return WAIT_ENFORCED;
+        else if(strat == "relaxed")
+            return RELAXED;
+        else {
+            std::cerr << "Bad read policy\n";
+            exit(1);
+        }
+    }else{
+        return WAIT_ENFORCED;
+    }
+}
+
+EvictCallType ConfigurationParser::parse_evict_call_type(YAML::Node type_configs){
+    if(type_configs["evict_call_type"]){
+        std::string strat = type_configs["evict_call_type"].as<std::string>();
+        if(strat == "client")
+            return CLIENT;
+        else if(strat == "housekeeper")
+            return HOUSEKEEPER;
+        else {
+            std::cerr << "Bad evict call type\n";
+            exit(1);
+        }
+    }else{
+        return CLIENT;
+    }
+}
 
 PrefetchDataPlaneBuilder* ConfigurationParser::parsePrefetchDataPlaneBuilder(HierarchicalDataPlane *root_data_plane, YAML::Node configs){
-    PrefetchDataPlaneBuilder* builder = PrefetchDataPlane::heap_create(root_data_plane);
+    PrefetchDataPlaneBuilder* builder = PrefetchDataPlane::create(root_data_plane);
 
     YAML::Node t_configs = configs["type_configs"];
 
@@ -149,8 +227,10 @@ PrefetchDataPlaneBuilder* ConfigurationParser::parsePrefetchDataPlaneBuilder(Hie
     if(t_configs["prefetch_tpool_size"])
         builder->with_prefetch_thread_pool_size(t_configs["prefetch_tpool_size"].as<int>());
 
-    if(t_configs["placement_strategy"])
-        builder->with_placement_strategy(t_configs["placement_strategy"].as<std::string>());
+    builder->with_control_policy(parse_control_policy(t_configs));
+    builder->with_read_policy(parse_read_policy(t_configs));
+    builder->with_evict_call_type(parse_evict_call_type(t_configs));
+    builder->with_placement_policy(parse_placement_policy(t_configs));
 
     return builder;
 }

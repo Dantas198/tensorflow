@@ -11,6 +11,7 @@ File::File(FileInfo* fi, uint64_t offset, size_t n){
     File::offset = offset;
     File::requested_size = n + offset > fi->_get_size() ? fi->_get_size() - offset : n;
     File::content = new char[n];
+    File::full_read = requested_size == fi->_get_size();
 }
 
 File::File(FileInfo* file_info){
@@ -18,18 +19,17 @@ File::File(FileInfo* file_info){
     File::requested_size = info->_get_size();
     File::offset = 0;
     File::content = new char[requested_size];
+    File::full_read = requested_size == file_info->_get_size();
 }
 
-/*
 File::File(File* file){
     File::info = file->info;
-    File::requested_size = info->get_size();
+    File::requested_size = file->requested_size;
     File::offset = file->offset;
-    //TODO maybe bring the delete inside the driver.write to avoid this extra copy
-    memcpy(File::content, file->get_content(), file->get_requested_size());
-    File::request_id = file->request_id;
+    File::content = file->content;
+    File::full_read = file->full_read;
 }
-*/
+
 File::~File() {
     delete[] content;
 }
@@ -64,6 +64,10 @@ FileInfo* File::get_info(){
 
 size_t File::get_offset(){
     return offset;
+}
+
+bool File::is_full_read(){
+    return full_read;
 }
 
 void File::print(int start, int finish){

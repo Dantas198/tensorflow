@@ -20,6 +20,7 @@ public:
     void configure_service(const std::string& path, int unique_id);
     void _write(const std::string& msg);
     void thread_unsafe_write(const std::string& msg);
+    bool is_activated();
 };
 
 #endif //THESIS_LOGGER_H

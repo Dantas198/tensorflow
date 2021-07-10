@@ -4,13 +4,13 @@
 
 #include "prefetched_file.h"
 
-PrefetchedFile::PrefetchedFile(MutexFileInfo *file_info, int id) : File(file_info) {
+PrefetchedFile::PrefetchedFile(StrictFileInfo *file_info, int id) : File(file_info) {
     PrefetchedFile::request_id = id;
     PrefetchedFile::placeholder = false;
 }
 
 
-int PrefetchedFile::get_request_id() {
+int PrefetchedFile::get_request_id() const {
     return request_id;
 }
 
@@ -22,6 +22,6 @@ bool PrefetchedFile::is_placeholder(){
     return placeholder;
 }
 
-MutexFileInfo* PrefetchedFile::get_info(){
-    return dynamic_cast<MutexFileInfo*>(info);
+StrictFileInfo* PrefetchedFile::get_info(){
+    return dynamic_cast<StrictFileInfo*>(info);
 }

@@ -3,11 +3,11 @@
 //
 
 #include <cstring>
-#include "memory_buffer_driver.h"
+#include "tbb_memory_buffer_driver.h"
 
-Status MemoryBufferDriver::read(File* f){
+Status TBBMemoryBufferDriver::read(FileInfo* fi, char* result, uint64_t offset, size_t n){
     content_hash_map::const_accessor a;
-    bool file_in_buffer = buffer.find(a, f->get_filename());
+    bool file_in_buffer = buffer.find(a, fi->get_name());
 
     if(file_in_buffer) {
         File* fc = a->second;
@@ -16,8 +16,8 @@ Status MemoryBufferDriver::read(File* f){
         a.release();
 
         // TODO see if this copy can be removed
-        memcpy(f->get_content(), fc->get_content() + f->get_offset(), f->get_requested_size());
-        return {static_cast<ssize_t>(f->get_requested_size())};
+        memcpy(result, fc->get_content() + offset, n);
+        return {static_cast<ssize_t>(n)};
     }
     else {
         // Release lock for this filename
@@ -27,9 +27,13 @@ Status MemoryBufferDriver::read(File* f){
     }
 }
 
+Status TBBMemoryBufferDriver::read(File* f){
+    return read(f->get_info(), f->get_content(), f->get_offset(), f->get_requested_size());
+}
+
 
 //TODO warning: deleting object of polymorphic class type 'File' which has non-virtual destructor might cause undefined behavior
-Status MemoryBufferDriver::remove(FileInfo* fi){
+Status TBBMemoryBufferDriver::remove(FileInfo* fi){
     content_hash_map::const_accessor a;
     bool file_in_buffer = buffer.find(a, fi->get_name());
     if(file_in_buffer) {
@@ -46,7 +50,24 @@ Status MemoryBufferDriver::remove(FileInfo* fi){
     return {NOT_FOUND};
 }
 
-Status MemoryBufferDriver::write(File* f){
+File* TBBMemoryBufferDriver::remove_for_copy(FileInfo* fi){
+    content_hash_map::const_accessor a;
+    bool file_in_buffer = buffer.find(a, fi->get_name());
+    if(file_in_buffer) {
+        File *f = a->second;
+        // Release lock for this filename
+        a.release();
+        buffer.erase(fi->get_name());
+        return f;
+    }
+    else {
+        std::cerr << "remove_for_copy failed for file: " << fi->get_name();
+        exit(1);
+    }
+}
+
+
+Status TBBMemoryBufferDriver::write(File* f){
     // Check if buffer contains file
     content_hash_map::accessor a;
     bool new_file = buffer.insert(a, f->get_filename());
@@ -65,12 +86,16 @@ Status MemoryBufferDriver::write(File* f){
     return {SUCCESS};
 }
 
-ssize_t MemoryBufferDriver::sizeof_content(FileInfo* fi){
+ssize_t TBBMemoryBufferDriver::sizeof_content(FileInfo* fi){
     return fi->_get_size() + fi->get_name().size();
 }
 
-bool MemoryBufferDriver::in_memory_type(){
+bool TBBMemoryBufferDriver::in_memory_type(){
     return true;
 }
 
-void MemoryBufferDriver::create_environment(std::vector<std::string>& dirs){}
+bool TBBMemoryBufferDriver::file_system_type(){
+    return false;
+}
+
+void TBBMemoryBufferDriver::create_environment(std::vector<std::string>& dirs){}

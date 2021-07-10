@@ -11,6 +11,7 @@
 #include <tuple>
 
 #include "../metadata/metadata_container_service.h"
+#include "../metadata/list_transforms.h"
 #ifdef BAZEL_BUILD
 #include "protos/controller_service.grpc.pb.h"
 #elif TF_BAZEL_BUILD
@@ -68,7 +69,7 @@ public:
             group = reply.group();
             for(const auto& s : reply.data_source_infos()) {
                 int count = s.sample_count();
-                auto sizes_info = MetadataContainerService::get_sizes(count, world_size_);
+                auto sizes_info = ListTransforms::get_sizes(count, world_size_);
                 partitioned_data_source_infos.emplace_back(s.name(), std::get<0>(sizes_info));
                 data_source_infos.emplace_back(s.name(), count);
             }
@@ -113,11 +114,11 @@ public:
             return std::vector<std::string>();
         }
         if(!shuffling_seeds.empty())
-            return MetadataContainerService::make_shuffled_list(data_source_infos, filenames, shuffling_seeds);
+            return ListTransforms::make_shuffled_list(data_source_infos, filenames, shuffling_seeds);
         else {
             if(epochs == 0)
                 std::cerr << "No epochs number defined. RequestSession must be called first" << std::endl;
-            return MetadataContainerService::make_list(data_source_infos, filenames, epochs);
+            return ListTransforms::make_list(data_source_infos, filenames, epochs);
         }
     }
 
@@ -131,31 +132,31 @@ public:
             full_paths.push_back(data_source_full_path + "/" + filename);
         }
         if(!shuffling_seeds.empty())
-            return MetadataContainerService::make_shuffled_list(data_source_infos,full_paths, shuffling_seeds);
+            return ListTransforms::make_shuffled_list(data_source_infos,full_paths, shuffling_seeds);
         else {
             if(epochs == 0)
                 std::cerr << "No epochs number defined. RequestSession must be called first" << std::endl;
-            return MetadataContainerService::make_list(data_source_infos, full_paths, epochs);
+            return ListTransforms::make_list(data_source_infos, full_paths, epochs);
         }
     }
 
     std::vector<int> get_ids(){
         if(!shuffling_seeds.empty())
-            return MetadataContainerService::make_shuffled_list(-1, 1, data_source_infos, shuffling_seeds);
+            return ListTransforms::make_shuffled_list(-1, 1, data_source_infos, shuffling_seeds);
         else {
             if(epochs == 0)
                 std::cerr << "No epochs number defined. RequestSession must be called first" << std::endl;
-            return MetadataContainerService::make_list(-1, 1, data_source_infos, epochs);
+            return ListTransforms::make_list(-1, 1, data_source_infos, epochs);
         }
     }
 
     std::vector<int> get_ids_from_rank(int rank){
         if(!shuffling_seeds.empty())
-            return MetadataContainerService::make_shuffled_list(rank, world_size_, data_source_infos, shuffling_seeds);
+            return ListTransforms::make_shuffled_list(rank, world_size_, data_source_infos, shuffling_seeds);
         else {
             if(epochs == 0)
                 std::cerr << "No epochs number defined. RequestSession must be called first" << std::endl;
-            return MetadataContainerService::make_list(rank, world_size_, data_source_infos, epochs);
+            return ListTransforms::make_list(rank, world_size_, data_source_infos, epochs);
         }
     }
 };
